@@ -172,6 +172,7 @@ def random_crop(image, label=None, crop_size=None, mean_rgb=[0,0,0], ignore_inde
     pad_label = np.ones((H,W), dtype=np.float32) * ignore_index
     pad_label[H_pad:(H_pad+h), W_pad:(W_pad+w)] = label
     label = pad_label[H_start:H_end, W_start:W_end]
+    # img_box：原图进行随机裁剪后，原图的位置
 
     return image, label, img_box
 

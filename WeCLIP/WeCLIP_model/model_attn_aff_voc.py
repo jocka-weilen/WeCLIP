@@ -31,18 +31,20 @@ def reshape_transform(tensor, height=28, width=28):
 
 
 
-def zeroshot_classifier(classnames, templates, model):
+def zeroshot_classifier(classnames, templates, model,device='cuda'):
     with torch.no_grad():
         zeroshot_weights = []
         for classname in classnames:
             texts = [template.format(classname) for template in templates] #format with class
-            texts = clip.tokenize(texts).cuda() #tokenize
+            # texts = clip.tokenize(texts).cuda() #tokenize
+            texts = clip.tokenize(texts).to(device) #tokenize
             class_embeddings = model.encode_text(texts) #embed with text encoder
             class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
             class_embedding = class_embeddings.mean(dim=0)
             class_embedding /= class_embedding.norm()
             zeroshot_weights.append(class_embedding)
-        zeroshot_weights = torch.stack(zeroshot_weights, dim=1).cuda()
+        # zeroshot_weights = torch.stack(zeroshot_weights, dim=1).cuda()
+        zeroshot_weights = torch.stack(zeroshot_weights, dim=1).to(device)
     return zeroshot_weights.t()
 
 
@@ -62,7 +64,7 @@ class WeCLIP(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
-
+        self.device = device
         self.encoder, _ = clip.load(clip_model, device=device)
 
         for name, param in self.encoder.named_parameters():
@@ -71,22 +73,22 @@ class WeCLIP(nn.Module):
 
         for name, param in self.encoder.named_parameters():
             print(name, param.requires_grad)
-
+        # in_channels: [768, 768, 768, 768]
         self.in_channels = in_channels
 
         self.decoder_fts_fuse = SegFormerHead(in_channels=self.in_channels,embedding_dim=self.embedding_dim,
                                               num_classes=self.num_classes, index=11)
         self.decoder = DecoderTransformer(width=self.embedding_dim, layers=3, heads=8, output_dim=self.num_classes)
 
-        self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder)
-        self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder)
+        self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder,device=device)
+        self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder,device=device)
 
         self.target_layers = [self.encoder.visual.transformer.resblocks[-1].ln_1]
         self.grad_cam = GradCAM(model=self.encoder, target_layers=self.target_layers, reshape_transform=reshape_transform)
         self.root_path = os.path.join(dataset_root_path, 'SegmentationClassAug')
         self.cam_bg_thres = 1
         self.encoder.eval()
-        self.par = PAR(num_iter=20, dilations=[1,2,4,8,12,24]).cuda()
+        self.par = PAR(num_iter=20, dilations=[1,2,4,8,12,24]).to(device)
         self.iter_num = 0
         self.require_all_fts = True
 
@@ -110,7 +112,7 @@ class WeCLIP(nn.Module):
         self.encoder.eval()
         self.iter_num += 1
 
-        fts_all, attn_weight_list = generate_clip_fts(img, self.encoder, require_all_fts=True)
+        fts_all, attn_weight_list = generate_clip_fts(img, self.encoder, require_all_fts=True,device=self.device)
 
         fts_all_stack = torch.stack(fts_all, dim=0) # (11, hw, b, c)
         attn_weight_stack = torch.stack(attn_weight_list, dim=0).permute(1, 0, 2, 3)
@@ -152,18 +154,20 @@ class WeCLIP(nn.Module):
                                                                    self.bg_text_features, self.fg_text_features,
                                                                    self.grad_cam,
                                                                    mode=mode,
-                                                                   require_seg_trans=require_seg_trans)
+                                                                   require_seg_trans=require_seg_trans,
+                                                                   device=self.device
+                                                                  )
 
 
             cam_dict = generate_cam_label(cam_refined_list, keys, w, h)
             
-            cams = cam_dict['refined_cam'].cuda()
+            cams = cam_dict['refined_cam'].to(self.device)
 
-            bg_score = torch.pow(1 - torch.max(cams, dim=0, keepdims=True)[0], self.cam_bg_thres).cuda()
-            cams = torch.cat([bg_score, cams], dim=0).cuda()
+            bg_score = torch.pow(1 - torch.max(cams, dim=0, keepdims=True)[0], self.cam_bg_thres).to(self.device)
+            cams = torch.cat([bg_score, cams], dim=0).to(self.device)
             
             valid_key = np.pad(cam_dict['keys'] + 1, (1, 0), mode='constant')
-            valid_key = torch.from_numpy(valid_key).cuda()
+            valid_key = torch.from_numpy(valid_key).to(self.device)
             
             with torch.no_grad():
                 cam_labels = _refine_cams(self.par, img[i], cams, valid_key)

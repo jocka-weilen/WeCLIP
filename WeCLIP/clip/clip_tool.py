@@ -28,13 +28,13 @@ class ClipOutputTarget:
 
 
 
-def generate_clip_fts(image, model, require_all_fts=True):
-    model = model.cuda()
+def generate_clip_fts(image, model, require_all_fts=True,device='cuda'):
+    model = model.to(device)
 
     if len(image.shape) == 3:
         image = image.unsqueeze(0)
     h, w = image.shape[-2], image.shape[-1]
-    image = image.cuda()
+    image = image.to(device)
     
     image_features_all, attn_weight_list = model.encode_image(image, h, w, require_all_fts=require_all_fts)
         
@@ -104,9 +104,9 @@ def generate_trans_mat_seg(aff_mask, attn_weight, grayscale_cam):
 
 
 def perform_single_voc_cam(img_path, image, image_features, attn_weight_list, seg_attn, bg_text_features,
-                       fg_text_features, cam, mode='train', require_seg_trans=False):
-    bg_text_features = bg_text_features.cuda()
-    fg_text_features = fg_text_features.cuda()
+                       fg_text_features, cam, mode='train', require_seg_trans=False,device='cuda'):
+    bg_text_features = bg_text_features.to(device)
+    fg_text_features = fg_text_features.to(device)
 
     ori_image = Image.open(img_path)
     ori_height, ori_width = np.asarray(ori_image).shape[:2]
@@ -131,10 +131,10 @@ def perform_single_voc_cam(img_path, image, image_features, attn_weight_list, se
 
     cam_refined_list = []
 
-    bg_features_temp = bg_text_features.cuda()  # [bg_id_for_each_image[im_idx]].to(device_id)
-    fg_features_temp = fg_text_features[label_id_list].cuda()
+    bg_features_temp = bg_text_features.to(device)  # [bg_id_for_each_image[im_idx]].to(device_id)
+    fg_features_temp = fg_text_features[label_id_list].to(device)
     text_features_temp = torch.cat([fg_features_temp, bg_features_temp], dim=0)
-    input_tensor = [image_features, text_features_temp.cuda(), h, w]
+    input_tensor = [image_features, text_features_temp.to(device), h, w]
 
     for idx, label in enumerate(label_list):
         label_index = new_class_names.index(label)
@@ -143,7 +143,7 @@ def perform_single_voc_cam(img_path, image, image_features, attn_weight_list, se
         grayscale_cam, logits_per_image, attn_weight_last = cam(input_tensor=input_tensor,
                                                                 targets=targets,
                                                                 target_size=None)  # (ori_width, ori_height))
-
+        # __flag__
         grayscale_cam = grayscale_cam[0, :]
 
         grayscale_cam_highres = cv2.resize(grayscale_cam, (w, h))
@@ -177,7 +177,7 @@ def perform_single_voc_cam(img_path, image, image_features, attn_weight_list, se
         _trans_mat = _trans_mat.float()
 
         box, cnt = scoremap2bbox(scoremap=grayscale_cam, threshold=0.4, multi_contour_eval=True)
-        aff_mask = torch.zeros((grayscale_cam.shape[0], grayscale_cam.shape[1])).cuda()
+        aff_mask = torch.zeros((grayscale_cam.shape[0], grayscale_cam.shape[1])).to(device)
         for i_ in range(cnt):
             x0_, y0_, x1_, y1_ = box[i_]
             aff_mask[y0_:y1_, x0_:x1_] = 1
@@ -185,7 +185,7 @@ def perform_single_voc_cam(img_path, image, image_features, attn_weight_list, se
         aff_mask = aff_mask.view(1, grayscale_cam.shape[0] * grayscale_cam.shape[1])
         trans_mat = _trans_mat*aff_mask
 
-        cam_to_refine = torch.FloatTensor(grayscale_cam).cuda()
+        cam_to_refine = torch.FloatTensor(grayscale_cam).to(device)
         cam_to_refine = cam_to_refine.view(-1, 1)
 
         cam_refined = torch.matmul(trans_mat, cam_to_refine).reshape(h // 16, w // 16)

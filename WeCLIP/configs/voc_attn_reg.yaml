@@ -1,6 +1,9 @@
+device: cpu # cpu, cuda:0 ...
+num_workers: 4 #default
+model_dir: None
 dataset:
-  root_dir: /your/path/VOCdevkit/VOC2012
-  name_list_dir: /your/path/WeCLIP/datasets/voc
+  root_dir: datasets/VOC2012
+  name_list_dir: datasets/voc
   num_classes: 21
   crop_size: 320
   resize_range: [512, 2048]
@@ -15,16 +18,21 @@ work_dir:
   tb_logger_dir: tb_logger
 
 train:
-  split: train_aug
+#  split: train_aug
+  split: train_aug_mac
   samples_per_gpu: 4 #4 #2
-  max_iters: 30000
+  max_iters: 40000
+#  max_iters: 10
   cam_iters: 2000
-  eval_iters: 2000
-  log_iters: 200
+#  eval_iters: 2000
+  eval_iters: 2
+#  log_iters: 200
+  log_iters: 2
 
 
 val:
-  split: train
+#  split: train
+  split: train_mac
 
 optimizer:
   type: AdamW
@@ -38,6 +46,6 @@ scheduler:
   power: 1.0
 
 clip_init:
-  clip_pretrain_path: /your/path/WeCLIP/pretrained/ViT-B-16.pt
+  clip_pretrain_path: clip/pretrained/ViT-B-16.pt
   embedding_dim: 256
   in_channels: [768, 768,768,768]

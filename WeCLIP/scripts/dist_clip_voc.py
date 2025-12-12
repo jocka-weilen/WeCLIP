@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import argparse
 import datetime
 import logging
@@ -25,13 +28,17 @@ from WeCLIP_model.model_attn_aff_voc import WeCLIP
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config",
-                    default='/your/path/WeCLIP/configs/voc_attn_reg.yaml',
+                    default='configs/voc_attn_reg.yaml',
                     type=str,
                     help="config")
 parser.add_argument("--seg_detach", action="store_true", help="detach seg")
 parser.add_argument("--work_dir", default=None, type=str, help="work_dir")
 parser.add_argument("--radius", default=8, type=int, help="radius")
 parser.add_argument("--crop_size", default=320, type=int, help="crop_size")
+# 使用传入的为准，如果不传入使用 config 配置文件中的
+parser.add_argument("--device", default=None, type=str, help="device default cfg") #
+# path='../clip/best/best.pth'
+parser.add_argument("--model_dir", default="clip/best/best.pth", type=str, help="load weclip") #
 
 
 def setup_seed(seed):
@@ -78,8 +85,8 @@ def validate(model=None, data_loader=None, cfg=None):
                         total=len(data_loader), ncols=100, ascii=" >="):
         name, inputs, labels, cls_label = data
 
-        inputs = inputs.cuda()
-        labels = labels.cuda()
+        inputs = inputs.to(cfg.device)
+        labels = labels.to(cfg.device)
 
         segs, cam, attn_loss = model(inputs, name, 'val')
 
@@ -133,14 +140,72 @@ def get_mask_by_radius(h=20, w=20, radius=8):
     return mask
 
 
+def load_weclip(model_dir,model,device="cuda"):
+    checkpoint = torch.load(model_dir, map_location=device)
+    model.load_state_dict(state_dict=checkpoint['model_state_dict'], strict=False)
+    n_iter = checkpoint['n_iter']
+    cam_score = checkpoint['cam_score']
+    seg_score = checkpoint['seg_score']
+    # seg_score = checkpoint['seg_score']
+
+    return n_iter, cam_score, seg_score
+
+
+def save_weclip(
+        model,
+        n_iter,
+        cam_score,
+        seg_score,
+        best_cam_miou,
+        best_seg_miou,
+        ckpt_dir
+):
+
+
+    cur_cam_miou = cam_score.get("miou", 0.0)
+    cur_seg_miou = seg_score.get("miou", 0.0)
+
+    save_flag = False
+
+    # 任意一个分数更高就保存
+    if cur_cam_miou > best_cam_miou:
+        best_cam_miou = cur_cam_miou
+        save_flag = True
+
+    if cur_seg_miou > best_seg_miou:
+        best_seg_miou = cur_seg_miou
+        save_flag = True
+
+    if save_flag:
+        # 格式化为 4 位小数并替换 '.' -> '_' 用于文件名
+        seg_str = f"{cur_seg_miou:.4f}".replace(".", "_")
+        cam_str = f"{cur_cam_miou:.4f}".replace(".", "_")
+        ckpt_name = os.path.join(
+            ckpt_dir,
+            f"WeCLIP_seg_iou_{seg_str}_cam_iou_{cam_str}.pth"
+        )
+
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'iter': n_iter,
+            'cam_score': cam_score,
+            'seg_score': seg_score,
+            'seg_miou':best_seg_miou,
+            'cam_miou':best_cam_miou,
+        }, ckpt_name)
+
+        logging.info(f"[BEST] Saved checkpoint at iter {n_iter}")
+
+    return best_cam_miou, best_seg_miou
+
 
 def train(cfg):
 
-    num_workers = 10
-    
+    num_workers = cfg.num_workers
+    # 获取时间，精确到微秒，将微妙设置为 0
     time0 = datetime.datetime.now()
     time0 = time0.replace(microsecond=0)
-    
+
     train_dataset = voc.VOC12ClsDataset(
         root_dir=cfg.dataset.root_dir,
         name_list_dir=cfg.dataset.name_list_dir,
@@ -154,7 +219,7 @@ def train(cfg):
         ignore_index=cfg.dataset.ignore_index,
         num_classes=cfg.dataset.num_classes,
     )
-    
+
     val_dataset = voc.VOC12SegDataset(
         root_dir=cfg.dataset.root_dir,
         name_list_dir=cfg.dataset.name_list_dir,
@@ -186,11 +251,12 @@ def train(cfg):
         embedding_dim=cfg.clip_init.embedding_dim,
         in_channels=cfg.clip_init.in_channels,
         dataset_root_path=cfg.dataset.root_dir,
-        device='cuda'
+        # device='cuda'，
+        device = "cuda" if "cuda" in cfg.device else "cpu"
     )
     logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()
-    WeCLIP_model.cuda()
+    WeCLIP_model.to(cfg.device)
 
 
     mask_size = int(cfg.dataset.crop_size // 16)
@@ -230,20 +296,30 @@ def train(cfg):
     )
     logging.info('\nOptimizer: \n%s' % optimizer)
 
+    # load pth __flag__
+    print("model_dir",cfg.model_dir)
+    if cfg.model_dir:
+        n_iter_loaded, best_cam_miou, best_seg_miou=load_weclip(model_dir=cfg.model_dir,model=WeCLIP_model,device=cfg.device)
+    else:
+        n_iter_loaded = 0  # 从 0 开始训练
+        best_cam_miou = 0.0
+        best_seg_miou = 0.0
+    WeCLIP_model.to(cfg.device)
+    # exit()
     train_loader_iter = iter(train_loader)
 
     avg_meter = AverageMeter()
 
+    pbar = tqdm(range(n_iter_loaded, cfg.train.max_iters))
+    for n_iter in pbar:
 
-    for n_iter in range(cfg.train.max_iters):
-        
         try:
             img_name, inputs, cls_labels, img_box = next(train_loader_iter)
         except:
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box = next(train_loader_iter)
 
-        segs, cam, attn_pred = WeCLIP_model(inputs.cuda(), img_name)
+        segs, cam, attn_pred = WeCLIP_model(inputs.to(cfg.device), img_name)
 
         pseudo_label = cam
 
@@ -251,7 +327,7 @@ def train(cfg):
 
         fts_cam = cam.clone()
 
-            
+
         aff_label = cams_to_affinity_label(fts_cam, mask=attn_mask, ignore_index=cfg.dataset.ignore_index)
         attn_loss, pos_count, neg_count = get_aff_loss(attn_pred, aff_label)
 
@@ -261,13 +337,17 @@ def train(cfg):
 
 
         avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item()})
-
+        # print({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item()})
+        pbar.set_postfix({
+            'seg': f"{seg_loss.item():.4f}",
+            'attn': f"{attn_loss.item():.4f}"
+        })
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
+
         if (n_iter + 1) % cfg.train.log_iters == 0:
-            
+
             delta, eta = cal_eta(time0, n_iter+1, cfg.train.max_iters)
             cur_lr = optimizer.param_groups[0]['lr']
 
@@ -279,24 +359,34 @@ def train(cfg):
 
             logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), seg_mAcc))
 
+            pbar.set_postfix({'seg_mAcc': f"{seg_mAcc:.4f}"}, refresh=True)
             writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item()}, global_step=n_iter)
 
-        
+
         if (n_iter + 1) % cfg.train.eval_iters == 0:
-            ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "WeCLIP_model_iter_%d.pth"%(n_iter+1))
             logging.info('Validating...')
-            if (n_iter + 1) > 26000:
-                torch.save(WeCLIP_model.state_dict(), ckpt_name)
             seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
             logging.info("cams score:")
             logging.info(cam_score)
             logging.info("segs score:")
             logging.info(seg_score)
+            seg_miou = seg_score.get('miou', 0.0)
+            cams_miou = cam_score.get('miou', 0.0)
+            pbar.set_postfix({'seg_miou': f"{seg_miou:.4f}"}, refresh=True)
+            pbar.set_postfix({'cams_miou': f"{cams_miou:.4f}"}, refresh=True)
+            save_weclip(model=WeCLIP_model,
+                        n_iter=n_iter,
+                        cam_score=cam_score,
+                        seg_score=seg_score,
+                        best_cam_miou=best_cam_miou,
+                        best_seg_miou=best_seg_miou,
+                        ckpt_dir=cfg.work_dir.ckpt_dir)
 
     return True
 
 
 if __name__ == "__main__":
+
 
     args = parser.parse_args()
     cfg = OmegaConf.load(args.config)
@@ -310,6 +400,11 @@ if __name__ == "__main__":
     cfg.work_dir.ckpt_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.ckpt_dir, timestamp)
     cfg.work_dir.pred_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.pred_dir)
     cfg.work_dir.tb_logger_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.tb_logger_dir, timestamp)
+
+    cfg.device = args.device if args.device not in [None, ""] else cfg.device
+    cfg.model_dir = args.model_dir if args.model_dir not in [None, ""] else (
+        cfg.model_dir if cfg.model_dir not in [None, ""] else None
+    )
 
     os.makedirs(cfg.work_dir.ckpt_dir, exist_ok=True)
     os.makedirs(cfg.work_dir.pred_dir, exist_ok=True)
